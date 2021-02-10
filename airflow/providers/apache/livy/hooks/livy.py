@@ -28,8 +28,8 @@ from airflow.providers.http.hooks.http import HttpHook
 from airflow.utils.log.logging_mixin import LoggingMixin
 
 
-class BatchState(Enum):
-    """Batch session states"""
+class SessionState(Enum):
+    """Session states"""
 
     NOT_STARTED = 'not_started'
     STARTING = 'starting'
@@ -41,6 +41,25 @@ class BatchState(Enum):
     DEAD = 'dead'
     KILLED = 'killed'
     SUCCESS = 'success'
+
+
+class StatementState(Enum):
+    """Batch session states"""
+    WAITING = 'waiting'
+    RUNNING = 'running'
+    AVAIBLE = 'available'
+    IDLE = 'idle'
+    ERROR = 'error'
+    CANCELLING = 'cancelling'
+    CANCELLED = 'cancelled'
+
+
+class SessionKind(Enum):
+
+    spark = 'spark'
+    pyspark = 'pyspark'
+    sparkr = 'sparkr'
+    sparksql = 'sql'
 
 
 class LivyHook(HttpHook, LoggingMixin):
@@ -56,10 +75,16 @@ class LivyHook(HttpHook, LoggingMixin):
     """
 
     TERMINAL_STATES = {
-        BatchState.SUCCESS,
-        BatchState.DEAD,
-        BatchState.KILLED,
-        BatchState.ERROR,
+        SessionState.SUCCESS,
+        SessionState.DEAD,
+        SessionState.KILLED,
+        SessionState.ERROR,
+    }
+
+    TERMINAL_STATEMENT_STATES = {
+        StatementState.AVAIBLE,
+        StatementState.ERROR,
+        StatementState.CANCELLED,
     }
 
     _def_headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
@@ -180,14 +205,14 @@ class LivyHook(HttpHook, LoggingMixin):
 
         return response.json()
 
-    def get_batch_state(self, session_id: Union[int, str]) -> BatchState:
+    def get_batch_state(self, session_id: Union[int, str]) -> SessionState:
         """
         Fetch the state of the specified batch
 
         :param session_id: identifier of the batch sessions
         :type session_id: Union[int, str]
         :return: batch state
-        :rtype: BatchState
+        :rtype: SessionState
         """
         self._validate_session_id(session_id)
 
@@ -205,7 +230,7 @@ class LivyHook(HttpHook, LoggingMixin):
         jresp = response.json()
         if 'state' not in jresp:
             raise AirflowException(f"Unable to get state for batch with id: {session_id}")
-        return BatchState(jresp['state'])
+        return SessionState(jresp['state'])
 
     def delete_batch(self, session_id: Union[int, str]) -> Any:
         """
@@ -228,6 +253,242 @@ class LivyHook(HttpHook, LoggingMixin):
             raise AirflowException(
                 "Could not kill the batch with session id: {}. Message: {}".format(
                     session_id, err.response.text
+                )
+            )
+
+        return response.json()
+
+    def post_sessions(self, *args: Any, **kwargs: Any) -> Any:
+        """
+        Perform request to create session
+
+        :return: session id
+        :rtype: int
+        """
+        session_submit_body = json.dumps(self.build_post_sessions_body(**kwargs))
+
+        if self.base_url is None:
+            # need to init self.base_url
+            self.get_conn()
+        self.log.info("Submitting job %s to %s", session_submit_body, self.base_url)
+
+        response = self.run_method(method='POST', endpoint='/sessions', data=session_submit_body)
+        self.log.debug("Got response: %s", response.text)
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as err:
+            raise AirflowException(
+                "Could not submit batch. Status code: {}. Message: '{}'".format(
+                    err.response.status_code, err.response.text
+                )
+            )
+
+        session_id = self._parse_post_response(response.json())
+        if session_id is None:
+            raise AirflowException("Unable to parse the batch session id")
+        self.log.info("Batch submitted with session id: %d", session_id)
+
+        return session_id
+
+    def get_session(self, session_id: Union[int, str]) -> Any:
+        """
+        Fetch info about the specified batch
+
+        :param session_id: identifier of the batch sessions
+        :type session_id: int
+        :return: response body
+        :rtype: dict
+        """
+        self._validate_session_id(session_id)
+
+        self.log.debug("Fetching info for batch session %d", session_id)
+        response = self.run_method(endpoint=f'/sessions/{session_id}')
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as err:
+            self.log.warning("Got status code %d for session %d", err.response.status_code, session_id)
+            raise AirflowException(
+                f"Unable to fetch batch with id: {session_id}. Message: {err.response.text}"
+            )
+
+        return response.json()
+
+    def get_session_state(self, session_id: Union[int, str]) -> SessionState:
+        """
+        Fetch the state of the specified batch
+
+        :param session_id: identifier of the batch sessions
+        :type session_id: Union[int, str]
+        :return: batch state
+        :rtype: SessionState
+        """
+        self._validate_session_id(session_id)
+
+        self.log.debug("Fetching info for batch session %d", session_id)
+        response = self.run_method(endpoint=f'/sessions/{session_id}/state')
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as err:
+            self.log.warning("Got status code %d for session %d", err.response.status_code, session_id)
+            raise AirflowException(
+                f"Unable to fetch batch with id: {session_id}. Message: {err.response.text}"
+            )
+
+        jresp = response.json()
+        if 'state' not in jresp:
+            raise AirflowException(f"Unable to get state for batch with id: {session_id}")
+        return SessionState(jresp['state'])
+
+    def delete_session(self, session_id: Union[int, str]) -> Any:
+        """
+        Delete the specified batch
+
+        :param session_id: identifier of the batch sessions
+        :type session_id: int
+        :return: response body
+        :rtype: dict
+        """
+        self._validate_session_id(session_id)
+
+        self.log.info("Deleting batch session %d", session_id)
+        response = self.run_method(method='DELETE', endpoint=f'/sessions/{session_id}')
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as err:
+            self.log.warning("Got status code %d for session %d", err.response.status_code, session_id)
+            raise AirflowException(
+                "Could not kill the batch with session id: {}. Message: {}".format(
+                    session_id, err.response.text
+                )
+            )
+
+        return response.json()
+
+    def post_session_statement(self, session_id: Union[int, str], *args: Any, **kwargs: Any) -> Any:
+        """
+        Perform request to create statement
+
+        :param session_id: identifier of the batch sessions
+        :type session_id: int
+        :return: statement
+        :rtype: str
+        """
+        session_submit_body = json.dumps(self.build_post_sessions_statement_body(**kwargs))
+
+        if self.base_url is None:
+            # need to init self.base_url
+            self.get_conn()
+        self.log.info("Submitting job %s to %s", session_submit_body, self.base_url)
+
+        response = self.run_method(method='POST', endpoint=f'/sessions/{session_id}/statements',
+                                   data=session_submit_body)
+        self.log.debug("Got response: %s", response.text)
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as err:
+            raise AirflowException(
+                "Could not submit batch. Status code: {}. Message: '{}'".format(
+                    err.response.status_code, err.response.text
+                )
+            )
+
+        statement_id = self._parse_post_response(response.json())
+        if statement_id is None:
+            raise AirflowException("Unable to parse the batch session id")
+        self.log.info("code submitted with statement id: %d", statement_id)
+
+        return statement_id
+
+    def get_session_statement_state(self, session_id: Union[int, str], statement_id: Union[int, str]) -> Any:
+        """
+        Fetch info about the specified batch
+
+        :param session_id: identifier of the sessions
+        :type session_id: int
+        :param statement_id: identifier of the statement
+        :type statement_id: int
+        :return: response body
+        :rtype: dict
+        """
+        self._validate_session_id(session_id)
+        self._validate_session_id(statement_id)
+
+        self.log.debug("Fetching info for statement %d in session %d", (statement_id, session_id))
+        response = self.run_method(endpoint=f'/sessions/{session_id}/statements/{statement_id}')
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as err:
+            self.log.warning("Got status code %d for session %d", err.response.status_code, session_id)
+            raise AirflowException(
+                f"Unable to fetch batch with id: {session_id}. Message: {err.response.text}"
+            )
+
+        jresp = response.json()
+        if 'state' not in jresp:
+            raise AirflowException(f"Unable to get state for batch with id: {session_id}")
+        return StatementState(jresp['state']), jresp['progress']
+
+    def get_session_statement_output(self, session_id: Union[int, str], statement_id: Union[int, str]) -> Any:
+        """
+        Fetch info about the specified batch
+
+        :param session_id: identifier of the sessions
+        :type session_id: int
+        :param statement_id: identifier of the statement
+        :type statement_id: int
+        :return: response body
+        :rtype: dict
+        """
+        self._validate_session_id(session_id)
+        self._validate_session_id(statement_id)
+
+        self.log.debug("Fetching info for statement %d in session %d", (statement_id, session_id))
+        response = self.run_method(endpoint=f'/sessions/{session_id}/statements/{statement_id}')
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as err:
+            self.log.warning("Got status code %d for session %d", err.response.status_code, session_id)
+            raise AirflowException(
+                f"Unable to fetch batch with id: {session_id}. Message: {err.response.text}"
+            )
+
+        jresp = response.json()
+        if 'state' not in jresp:
+            raise AirflowException(f"Unable to get state for batch with id: {session_id}")
+        return jresp['output']
+
+    def cancel_statement(self, session_id: Union[int, str], statement_id: Union[int, str]) -> Any:
+        """
+        Delete the specified batch
+
+        :param session_id: identifier of the batch sessions
+        :type session_id: int
+        :param statement_id: identifier of the statement
+        :type statement_id: int
+        :return: response body
+        :rtype: dict
+        """
+        self._validate_session_id(session_id)
+        self._validate_session_id(statement_id)
+
+        self.log.info("Cancelling statement session %d statement %d", session_id, statement_id)
+        response = self.run_method(method='POST', endpoint=f'/sessions/{session_id}/statements/{statement_id}/cancel')
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as err:
+            self.log.warning("Got status code %d for session %d statement %d", err.response.status_code, session_id,
+                             statement_id)
+            raise AirflowException(
+                "Could not kill the statement with session id: {}. Statement id:{}. Message: {}".format(
+                    session_id, statement_id, err.response.text
                 )
             )
 
@@ -351,6 +612,116 @@ class LivyHook(HttpHook, LoggingMixin):
             body['name'] = name
         if conf and LivyHook._validate_extra_conf(conf):
             body['conf'] = conf
+
+        return body
+
+    @staticmethod
+    def build_post_sessions_body(
+        kind: str,
+        args: Optional[Sequence[Union[str, int, float]]] = None,
+        jars: Optional[List[str]] = None,
+        py_files: Optional[List[str]] = None,
+        archives: Optional[List[str]] = None,
+        name: Optional[str] = None,
+        driver_memory: Optional[str] = None,
+        driver_cores: Optional[Union[int, str]] = None,
+        executor_memory: Optional[str] = None,
+        executor_cores: Optional[int] = None,
+        num_executors: Optional[Union[int, str]] = None,
+        queue: Optional[str] = None,
+        proxy_user: Optional[str] = None,
+        conf: Optional[Dict[Any, Any]] = None,
+    ) -> Any:
+        """
+        Build the post batch request body.
+        For more information about the format refer to
+        .. seealso:: https://livy.apache.org/docs/latest/rest-api.html
+
+        :param kind: session kind
+        :param proxy_user: User to impersonate when running the job.
+        :type proxy_user: str
+        :param args: Command line arguments for the application s.
+        :type args: Sequence[Union[str, int, float]]
+        :param jars: jars to be used in this sessions.
+        :type jars: Sequence[str]
+        :param py_files: Python files to be used in this session.
+        :type py_files: Sequence[str]
+        :param driver_memory: Amount of memory to use for the driver process  string.
+        :type driver_memory: str
+        :param driver_cores: Number of cores to use for the driver process int.
+        :type driver_cores: Union[str, int]
+        :param executor_memory: Amount of memory to use per executor process  string.
+        :type executor_memory: str
+        :param executor_cores: Number of cores to use for each executor  int.
+        :type executor_cores: Union[int, str]
+        :param num_executors: Number of executors to launch for this session  int.
+        :type num_executors: Union[str, int]
+        :param archives: Archives to be used in this session.
+        :type archives: Sequence[str]
+        :param queue: The name of the YARN queue to which submitted string.
+        :type queue: str
+        :param name: The name of this session string.
+        :type name: str
+        :param conf: Spark configuration properties.
+        :type conf: dict
+        :return: request body
+        :rtype: dict
+        """
+        # pylint: disable-msg=too-many-arguments
+
+        body: Dict[str, Any] = {}
+        if kind and kind in SessionKind.__members__:
+            body['kind'] = SessionKind.__members__.get(kind).value
+        if proxy_user:
+            body['proxyUser'] = proxy_user
+        if args and LivyHook._validate_list_of_stringables(args):
+            body['args'] = [str(val) for val in args]
+        if jars and LivyHook._validate_list_of_stringables(jars):
+            body['jars'] = jars
+        if py_files and LivyHook._validate_list_of_stringables(py_files):
+            body['pyFiles'] = py_files
+        if driver_memory and LivyHook._validate_size_format(driver_memory):
+            body['driverMemory'] = driver_memory
+        if driver_cores:
+            body['driverCores'] = driver_cores
+        if executor_memory and LivyHook._validate_size_format(executor_memory):
+            body['executorMemory'] = executor_memory
+        if executor_cores:
+            body['executorCores'] = executor_cores
+        if num_executors:
+            body['numExecutors'] = num_executors
+        if archives and LivyHook._validate_list_of_stringables(archives):
+            body['archives'] = archives
+        if queue:
+            body['queue'] = queue
+        if name:
+            body['name'] = name
+        if conf and LivyHook._validate_extra_conf(conf):
+            body['conf'] = conf
+
+        return body
+
+    @staticmethod
+    def build_post_sessions_statement_body(
+        kind: str,
+        code: str
+    ) -> Any:
+        """
+        Build the post batch request body.
+        For more information about the format refer to
+        .. seealso:: https://livy.apache.org/docs/latest/rest-api.html
+
+        :param code: code to be executed
+        :param kind: session kind
+
+        """
+        # pylint: disable-msg=too-many-arguments
+
+        body: Dict[str, Any] = {}
+        if kind and kind in SessionKind.__members__:
+            body['kind'] = SessionKind.__members__.get(kind).value
+        if code:
+            body['code'] = code
 
         return body
 

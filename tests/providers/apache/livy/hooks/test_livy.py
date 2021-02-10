@@ -25,11 +25,11 @@ from requests.exceptions import RequestException
 
 from airflow.exceptions import AirflowException
 from airflow.models import Connection
-from airflow.providers.apache.livy.hooks.livy import BatchState, LivyHook
+from airflow.providers.apache.livy.hooks.livy import SessionState, LivyHook
 from airflow.utils import db
 
 BATCH_ID = 100
-SAMPLE_GET_RESPONSE = {'id': BATCH_ID, 'state': BatchState.SUCCESS.value}
+SAMPLE_GET_RESPONSE = {'id': BATCH_ID, 'state': SessionState.SUCCESS.value}
 
 
 class TestLivyHook(unittest.TestCase):
@@ -247,7 +247,7 @@ class TestLivyHook(unittest.TestCase):
         mock_request.return_value.status_code = 201
         mock_request.return_value.json.return_value = {
             'id': BATCH_ID,
-            'state': BatchState.STARTING.value,
+            'state': SessionState.STARTING.value,
             'log': [],
         }
 
@@ -270,7 +270,7 @@ class TestLivyHook(unittest.TestCase):
         mock.register_uri(
             'POST',
             '//livy:8998/batches',
-            json={'id': BATCH_ID, 'state': BatchState.STARTING.value, 'log': []},
+            json={'id': BATCH_ID, 'state': SessionState.STARTING.value, 'log': []},
             status_code=201,
         )
 
@@ -319,7 +319,7 @@ class TestLivyHook(unittest.TestCase):
     @requests_mock.mock()
     def test_get_batch_state_success(self, mock):
 
-        running = BatchState.RUNNING
+        running = SessionState.RUNNING
 
         mock.register_uri(
             'GET',
@@ -330,7 +330,7 @@ class TestLivyHook(unittest.TestCase):
 
         state = LivyHook().get_batch_state(BATCH_ID)
 
-        assert isinstance(state, BatchState)
+        assert isinstance(state, SessionState)
         assert state == running
 
     @requests_mock.mock()

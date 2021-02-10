@@ -24,7 +24,7 @@ import pytest
 from airflow.exceptions import AirflowException
 from airflow.models import Connection
 from airflow.models.dag import DAG
-from airflow.providers.apache.livy.hooks.livy import BatchState, LivyHook
+from airflow.providers.apache.livy.hooks.livy import SessionState, LivyHook
 from airflow.providers.apache.livy.operators.livy import LivyOperator
 from airflow.utils import db, timezone
 
@@ -47,7 +47,7 @@ class TestLivyOperator(unittest.TestCase):
     @patch('airflow.providers.apache.livy.operators.livy.LivyHook.get_batch_state')
     def test_poll_for_termination(self, mock_livy):
 
-        state_list = 2 * [BatchState.RUNNING] + [BatchState.SUCCESS]
+        state_list = 2 * [SessionState.RUNNING] + [SessionState.SUCCESS]
 
         def side_effect(_):
             if state_list:
@@ -67,7 +67,7 @@ class TestLivyOperator(unittest.TestCase):
     @patch('airflow.providers.apache.livy.operators.livy.LivyHook.get_batch_state')
     def test_poll_for_termination_fail(self, mock_livy):
 
-        state_list = 2 * [BatchState.RUNNING] + [BatchState.ERROR]
+        state_list = 2 * [SessionState.RUNNING] + [SessionState.ERROR]
 
         def side_effect(_):
             if state_list:
@@ -88,7 +88,7 @@ class TestLivyOperator(unittest.TestCase):
 
     @patch(
         'airflow.providers.apache.livy.operators.livy.LivyHook.get_batch_state',
-        return_value=BatchState.SUCCESS,
+        return_value=SessionState.SUCCESS,
     )
     @patch('airflow.providers.apache.livy.operators.livy.LivyHook.post_batch', return_value=BATCH_ID)
     def test_execution(self, mock_post, mock_get):
