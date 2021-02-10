@@ -44,10 +44,10 @@ class SessionState(Enum):
 
 
 class StatementState(Enum):
-    """Batch session states"""
+    """Session statement states"""
     WAITING = 'waiting'
     RUNNING = 'running'
-    AVAIBLE = 'available'
+    AVAILABLE = 'available'
     IDLE = 'idle'
     ERROR = 'error'
     CANCELLING = 'cancelling'
